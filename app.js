@@ -13,7 +13,16 @@ const $ = (s) => document.querySelector(s),
 const euro = (c) =>
   (c / 100).toLocaleString("de-DE", { style: "currency", currency: "EUR" });
 const cents = (n) => Math.round(Number(n) * 100);
-const today = () => new Date().toISOString().slice(0, 10);
+const isoDate = (d) =>
+  `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+const today = () => isoDate(new Date());
+const addDays = (iso, n) => {
+  let d = new Date(iso + "T12:00:00");
+  d.setDate(d.getDate() + n);
+  return isoDate(d);
+};
+const byDate = (a, b) =>
+  a.date < b.date ? -1 : a.date > b.date ? 1 : a.createdAt - b.createdAt;
 const fmt = (d) =>
   new Date(d + "T12:00:00").toLocaleDateString("de-DE", {
     day: "2-digit",
@@ -166,8 +175,10 @@ async function render() {
   $("#withdrawBtn").querySelector("span").textContent = l.withdraw;
   document.querySelector("[data-view=book] span").textContent = l.nav;
   let interest = Math.round((b * rate) / 100);
-  $("#nextInterest").textContent =
-    l.level < 4
+  let waiting = (await pendingSundays()).length;
+  $("#nextInterest").textContent = waiting
+    ? `🎉 Taschengeld wartet!${waiting > 1 ? " (" + waiting + " Sonntage)" : ""}`
+    : l.level < 4
       ? `✨ ${l.gift}: ungefähr ${euro(interest)}`
       : `✨ ${l.gift}: ungefähr ${euro(interest)}${l.level >= 5 ? " bei " + rate + " %" : ""}`;
   $("#interestLabel").textContent =
@@ -207,9 +218,9 @@ async function renderValues(b) {
 }
 async function renderLedger() {
   let l = await learning(),
-    xs = (await transactions()).sort((a, b) => b.createdAt - a.createdAt),
+    xs = (await transactions()).sort((a, b) => byDate(b, a)),
     running = 0,
-    chronological = [...xs].sort((a, b) => a.createdAt - b.createdAt),
+    chronological = [...xs].sort(byDate),
     after = new Map();
   chronological.forEach((x) => {
     running += x.amount;
@@ -238,46 +249,97 @@ async function renderLedger() {
         .join("")
     : `<p class="muted">${l.empty}</p>`;
 }
+// Sonntag (YYYY-MM-DD, lokale Zeit) der Woche, in der d liegt – also der letzte Sonntag <= d
 function sundayKey(d = new Date()) {
   let x = new Date(d);
-  let day = x.getDay();
-  x.setDate(x.getDate() - day);
-  return x.toISOString().slice(0, 10);
+  x.setHours(12, 0, 0, 0);
+  x.setDate(x.getDate() - x.getDay());
+  return isoDate(x);
+}
+const SAVE_LABEL = (l) =>
+  l.level === 1
+    ? "Dem Münzling gegeben"
+    : l.level === 2
+      ? "Gespart"
+      : "Eingezahlt";
+const INTEREST_LABEL = (l) => (l.level < 4 ? l.gift : "Zinsen");
+// Alle Sonntage, die noch nicht ausgezahlt wurden – der älteste zuerst.
+// Ab Sonntag ist das neue Taschengeld da und bleibt verfügbar, bis es ausgezahlt wurde.
+async function pendingSundays() {
+  let current = sundayKey(),
+    last = await getSetting("lastSunday");
+  if (!last) return [current];
+  // Ältere Versionen haben das Datum in UTC gespeichert (konnte ein Samstag sein) → auf den Sonntag normalisieren
+  last = sundayKey(new Date(addDays(last, 1) + "T12:00:00"));
+  let xs = [];
+  for (
+    let s = addDays(last, 7);
+    s <= current && xs.length < 104;
+    s = addDays(s, 7)
+  )
+    xs.push(s);
+  return xs;
+}
+// Kontostand, wie er an diesem Sonntag war (alles bis einschließlich diesem Tag)
+async function balanceAt(day) {
+  return (await transactions())
+    .filter((x) => x.date <= day)
+    .reduce((a, x) => a + x.amount, 0);
 }
 async function renderSunday() {
   let l = await learning(),
-    key = sundayKey(),
-    done = (await getSetting("lastSunday")) === key,
-    day = new Date().getDay(),
-    b = await balance(),
-    rate = await getSetting("interestRate"),
-    allow = await getSetting("allowance"),
-    interest = Math.round((b * rate) / 100),
-    c = $("#sundayContent");
+    c = $("#sundayContent"),
+    pending = await pendingSundays();
+  if (!pending.length) {
+    let day = new Date().getDay(),
+      next = addDays(sundayKey(), 7);
+    c.innerHTML =
+      day === 0
+        ? `<div class="sunday-card"><div class="confetti">🎉✨🪙</div><div class="huge">Fertig!</div><p>Nächsten Sonntag geht's weiter.</p></div>`
+        : `<div class="sunday-card"><div class="confetti">🎉✨🪙</div><div class="huge">Fertig!</div><p>Noch ein bisschen warten …</p><b>Nächster Taschengeldtag: Sonntag, ${fmt(next)} 🪙</b></div>`;
+    return;
+  }
+  let s = pending[0],
+    done = await getSetting("interestDoneFor");
+  if (done?.sunday === s) return sundayFlow(s); // Zinsen schon gutgeschrieben → direkt zum Taschengeld
+  let rate = await getSetting("interestRate"),
+    b = await balanceAt(s),
+    interest = Math.round((b * rate) / 100);
   let explain =
     l.level < 4
       ? "Dein Geld ist gewachsen!"
       : l.level === 4
         ? `Du bekommst ${euro(interest)} Zinsen.`
         : `Du bekommst ${euro(interest)} Zinsen. Auch frühere Zinsen bekommen wieder Zinsen!`;
-  if (done)
-    c.innerHTML = `<div class="sunday-card"><div class="confetti">🎉✨🪙</div><div class="huge">Fertig!</div><p>Nächsten Sonntag geht's weiter.</p></div>`;
-  else if (day !== 0)
-    c.innerHTML = `<div class="sunday-card"><div class="huge">${["So", "Mo", "Di", "Mi", "Do", "Fr", "Sa"][day]}</div><p>Noch ein bisschen warten …</p><b>Sonntag ist Taschengeldtag 🪙</b></div>`;
-  else
-    ((c.innerHTML = `<div class="sunday-card"><p>${l.level === 1 ? "Der Münzling hat auf dein Geld aufgepasst 🪙" : l.place}</p><div class="huge">✨ + ${euro(interest)}</div><p>${explain}</p><button class="primary" id="startSunday">Los geht's! 🎉</button></div>`),
-      $("#startSunday") &&
-        ($("#startSunday").onclick = () => sundayFlow(b, rate, allow, key)));
+  c.innerHTML = `<div class="sunday-card">${sundayHead(s, pending.length)}<p>${l.level === 1 ? "Der Münzling hat auf dein Geld aufgepasst 🪙" : l.place}</p><div class="huge">✨ + ${euro(interest)}</div><p>${explain}</p><button class="primary" id="startSunday">Los geht's! 🎉</button></div>`;
+  $("#startSunday").onclick = (e) => {
+    e.currentTarget.disabled = true;
+    sundayFlow(s);
+  };
 }
-async function sundayFlow(b, rate, allow, key) {
+function sundayHead(s, n) {
+  let label = s === today() ? "Heute ist Sonntag" : `Sonntag, ${fmt(s)}`;
+  return `<div class="tiny">${label.toUpperCase()}</div>${n > 1 ? `<div class="pill">📅 Noch ${n} Sonntage zum Nachholen</div>` : ""}`;
+}
+async function sundayFlow(s) {
   let l = await learning(),
-    interest = Math.round((b * rate) / 100);
-  if (interest > 0)
-    await addTx("interest", interest, l.level < 4 ? l.gift : "Zinsen");
+    pending = await pendingSundays();
+  if (pending[0] !== s) return render(); // schon erledigt (z. B. doppelt getippt)
+  let rate = await getSetting("interestRate"),
+    allow = await getSetting("allowance"),
+    done = await getSetting("interestDoneFor"),
+    interest;
+  if (done?.sunday === s) interest = done.amount;
+  else {
+    // Zinsen auf den Stand von diesem Sonntag, gebucht auf diesen Sonntag
+    interest = Math.round(((await balanceAt(s)) * rate) / 100);
+    if (interest > 0) await addTx("interest", interest, INTEREST_LABEL(l), s);
+    await setSetting("interestDoneFor", { sunday: s, amount: interest });
+  }
   let count = Math.round(allow / 100),
     save = 0,
     c = $("#sundayContent");
-  c.innerHTML = `<div class="sunday-card"><div class="confetti">✨ +${euro(interest)}</div><h2>Deine ${euro(allow)}!</h2><p>${l.level === 1 ? "Welche Münzen darf der Münzling für dich aufbewahren?" : "Wie viel möchtest du " + (l.level === 2 ? "sparen?" : "auf dein Sparkonto einzahlen?")}</p><div class="choice-hint"><span>👧 ${l.level <= 2 ? "Bei mir" : "Bargeld"}</span><span>🪙 ${l.place}</span></div><div class="coins">${Array.from({ length: count }, (_, i) => `<button class="coin" data-i="${i}">1 €</button>`).join("")}</div><div class="huge" id="saveSum">0 € 🪙</div><button class="primary" id="saveSunday">So machen!</button></div>`;
+  c.innerHTML = `<div class="sunday-card">${sundayHead(s, pending.length)}<div class="confetti">✨ +${euro(interest)}</div><h2>Deine ${euro(allow)}!</h2><p>${l.level === 1 ? "Welche Münzen darf der Münzling für dich aufbewahren?" : "Wie viel möchtest du " + (l.level === 2 ? "sparen?" : "auf dein Sparkonto einzahlen?")}</p><div class="choice-hint"><span>👧 ${l.level <= 2 ? "Bei mir" : "Bargeld"}</span><span>🪙 ${l.place}</span></div><div class="coins">${Array.from({ length: count }, (_, i) => `<button class="coin" data-i="${i}">1 €</button>`).join("")}</div><div class="huge" id="saveSum">0 € 🪙</div><button class="primary" id="saveSunday">So machen!</button></div>`;
   $$(".coin").forEach(
     (x) =>
       (x.onclick = () => {
@@ -286,23 +348,16 @@ async function sundayFlow(b, rate, allow, key) {
         $("#saveSum").textContent = `${euro(save)} 🪙`;
       }),
   );
-  $("#saveSunday").onclick = async () => {
-    if (save)
-      await addTx(
-        "allowance",
-        save,
-        l.level === 1
-          ? "Dem Münzling gegeben"
-          : l.level === 2
-            ? "Gespart"
-            : "Eingezahlt",
-      );
-    await setSetting("lastSunday", key);
-    await render();
+  $("#saveSunday").onclick = async (e) => {
+    e.currentTarget.disabled = true;
+    if ((await pendingSundays())[0] !== s) return render();
+    if (save) await addTx("allowance", save, SAVE_LABEL(l), s);
+    await setSetting("lastSunday", s);
+    await render(); // zeigt den nächsten verpassten Sonntag – oder „Fertig!“
   };
 }
 async function renderGrowth() {
-  let xs = (await transactions()).sort((a, b) => a.createdAt - b.createdAt),
+  let xs = (await transactions()).sort(byDate),
     sum = 0,
     pts = [];
   xs.forEach((x) => {
