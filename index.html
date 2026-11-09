@@ -63,6 +63,16 @@
       <section id="book" class="view">
         <div class="book-head">📕 <b id="bookTitle">Mein Münzling-Buch</b></div>
         <div id="ledger" class="ledger"></div>
+        <div class="backup">
+          <button id="backupExport">💾 Daten sichern</button>
+          <button id="backupImport">📂 Daten laden</button>
+          <input
+            id="backupFile"
+            type="file"
+            accept=".json,application/json"
+            hidden
+          />
+        </div>
       </section>
       <section id="growth" class="view">
         <h1>📈 Mein Geld wächst</h1>
