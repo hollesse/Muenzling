@@ -522,19 +522,50 @@ async function exportData() {
     ),
     transactions: await transactions(),
   };
+  let name = `muenzling-${today()}.json`,
+    file = new File([JSON.stringify(data, null, 2)], name, {
+      type: "application/json",
+    });
+  // Auf Tablet/Handy das Teilen-Menü anbieten (z. B. „In Dateien sichern“, AirDrop).
+  // Gibt es nur über HTTPS – sonst normaler Download.
+  if (navigator.maxTouchPoints > 0 && navigator.canShare?.({ files: [file] })) {
+    try {
+      await navigator.share({ files: [file], title: name });
+      return;
+    } catch (err) {
+      if (err.name === "AbortError") return; // abgebrochen
+    }
+  }
   let a = document.createElement("a");
-  a.href = URL.createObjectURL(
-    new Blob([JSON.stringify(data, null, 2)], { type: "application/json" }),
-  );
-  a.download = `muenzling-${today()}.json`;
+  a.href = URL.createObjectURL(file);
+  a.download = name;
+  document.body.append(a);
   a.click();
-  URL.revokeObjectURL(a.href);
+  a.remove();
+  // Erst später freigeben, sonst bricht Safari den Download teils ab
+  setTimeout(() => URL.revokeObjectURL(a.href), 60000);
 }
 async function importData(e) {
   let f = e.target.files[0];
+  e.target.value = ""; // dieselbe Datei soll erneut auswählbar sein
   if (!f) return;
-  let data = JSON.parse(await f.text());
-  if (!confirm("Aktuelle Daten durch dieses Backup ersetzen?")) return;
+  let data;
+  try {
+    data = JSON.parse(await f.text());
+  } catch {
+    return alert("Diese Datei ist keine Münzling-Sicherung.");
+  }
+  if (!Array.isArray(data?.settings) || !Array.isArray(data?.transactions))
+    return alert("Diese Datei ist keine Münzling-Sicherung.");
+  let when = data.exportedAt
+    ? new Date(data.exportedAt).toLocaleString("de-DE")
+    : "unbekannt";
+  if (
+    !confirm(
+      `Sicherung vom ${when} mit ${data.transactions.length} Buchungen laden?\n\nDie aktuellen Daten auf diesem Gerät werden dabei ersetzt.`,
+    )
+  )
+    return;
   let t = db.transaction(["settings", "transactions"], "readwrite"),
     s = t.objectStore("settings"),
     x = t.objectStore("transactions");
@@ -564,6 +595,10 @@ $("#depositBtn").onclick = () => moneyDialog("deposit");
 $("#withdrawBtn").onclick = () => moneyDialog("withdraw");
 $("#settingsBtn").onclick = parentOpen;
 $("#parentClose").onclick = () => $("#parentDialog").close();
+// Sicherung unter dem Buch (ohne PIN, damit sie auch ohne HTTPS erreichbar ist)
+$("#backupExport").onclick = exportData;
+$("#backupImport").onclick = () => $("#backupFile").click();
+$("#backupFile").onchange = importData;
 (async () => {
   await openDB();
   await render();
